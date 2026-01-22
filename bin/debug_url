@@ -1,0 +1,52 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "dotenv"
+require "uri"
+
+Dotenv.load
+
+cookie = ENV["STRAVA_COOKIE"]
+
+# Parse cookie into auth params
+auth_params = {}
+cookie.split(/;\s*/).each do |part|
+  key, value = part.split("=", 2)
+  case key
+  when "CloudFront-Key-Pair-Id"
+    auth_params[:key_pair_id] = value
+  when "CloudFront-Policy"
+    auth_params[:policy] = value
+  when "CloudFront-Signature"
+    auth_params[:signature] = value
+  end
+end
+
+puts "Raw values:"
+puts "  Key-Pair-Id: #{auth_params[:key_pair_id]}"
+puts "  Policy length: #{auth_params[:policy]&.length} chars"
+puts "  Signature length: #{auth_params[:signature]&.length} chars"
+puts ""
+
+# Method 1: URI.encode_www_form (what we're using)
+query1 = URI.encode_www_form(
+  "Key-Pair-Id" => auth_params[:key_pair_id],
+  "Policy" => auth_params[:policy],
+  "Signature" => auth_params[:signature]
+)
+
+# Method 2: No encoding (raw)
+query2 = "Key-Pair-Id=#{auth_params[:key_pair_id]}&Policy=#{auth_params[:policy]}&Signature=#{auth_params[:signature]}"
+
+puts "URL with encode_www_form:"
+puts "  https://heatmap-external-a.strava.com/tiles-auth/winter/hot/8/43/99.png?#{query1[0..100]}..."
+puts ""
+puts "URL without encoding:"
+puts "  https://heatmap-external-a.strava.com/tiles-auth/winter/hot/8/43/99.png?#{query2[0..100]}..."
+puts ""
+
+# Test if ~ is being encoded
+if query1.include?("%7E")
+  puts "NOTE: The ~ character is being URL-encoded to %7E"
+  puts "This might be causing the 403 error."
+end

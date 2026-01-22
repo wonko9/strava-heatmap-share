@@ -1,0 +1,60 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "dotenv"
+require "aws-sdk-s3"
+
+Dotenv.load
+
+bucket = ENV["AWS_S3_BUCKET"]
+region = ENV["AWS_REGION"]
+
+puts "Checking S3 configuration..."
+puts ""
+puts "Bucket: #{bucket}"
+puts "Region: #{region}"
+puts "Access Key: #{ENV['AWS_ACCESS_KEY_ID'][0..5]}..." if ENV['AWS_ACCESS_KEY_ID']
+puts ""
+
+client = Aws::S3::Client.new(region: region)
+
+# Try to get bucket location
+begin
+  resp = client.get_bucket_location(bucket: bucket)
+  actual_region = resp.location_constraint
+  actual_region = "us-east-1" if actual_region.nil? || actual_region.empty?
+  puts "Bucket exists!"
+  puts "Actual region: #{actual_region}"
+
+  if actual_region != region
+    puts ""
+    puts "WARNING: Region mismatch!"
+    puts "  Configured: #{region}"
+    puts "  Actual: #{actual_region}"
+    puts ""
+    puts "Update AWS_REGION in your .env file to: #{actual_region}"
+  end
+rescue Aws::S3::Errors::NoSuchBucket
+  puts "ERROR: Bucket does not exist"
+rescue Aws::S3::Errors::AccessDenied
+  puts "ERROR: Access denied - check your AWS credentials"
+rescue Aws::S3::Errors::InvalidAccessKeyId
+  puts "ERROR: Invalid AWS Access Key ID"
+rescue Aws::S3::Errors::SignatureDoesNotMatch
+  puts "ERROR: Invalid AWS Secret Access Key"
+rescue => e
+  puts "ERROR: #{e.class} - #{e.message}"
+end
+
+# Try to list bucket contents
+puts ""
+puts "Trying to list bucket contents..."
+begin
+  resp = client.list_objects_v2(bucket: bucket, max_keys: 5)
+  puts "Success! Found #{resp.key_count} objects"
+  resp.contents.each do |obj|
+    puts "  - #{obj.key}"
+  end
+rescue => e
+  puts "ERROR: #{e.class} - #{e.message}"
+end

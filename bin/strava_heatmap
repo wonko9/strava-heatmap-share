@@ -1,0 +1,448 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "optparse"
+require_relative "../lib/strava_heatmap"
+
+options = {
+  activity: StravaHeatmap::DEFAULT_ACTIVITY,
+  color: StravaHeatmap::DEFAULT_COLOR,
+  min_zoom: StravaHeatmap::DEFAULT_MIN_ZOOM,
+  max_zoom: StravaHeatmap::DEFAULT_MAX_ZOOM,
+  prefix: "tiles",
+  dry_run: false,
+  skip_existing: false,
+  gpx_file: nil,
+  gaia_url: nil,
+  kml_output: nil,
+  list_areas: false,
+  save_area: nil,
+  save_only: nil,
+  use_area: nil,
+  delete_area: nil
+}
+
+parser = OptionParser.new do |opts|
+  opts.banner = "Usage: strava_heatmap [options] [NW_LAT,NW_LNG SE_LAT,SE_LNG]"
+  opts.separator ""
+  opts.separator "Downloads Strava heatmap tiles for a region and uploads to S3."
+  opts.separator ""
+  opts.separator "Coordinates can be specified as arguments or via a GPX file."
+  opts.separator ""
+  opts.separator "Activity types: BackcountrySki, NordicSki, AlpineSki, Snowboard, Snowshoe,"
+  opts.separator "                Ride, Run, Walk, Hike, Swim, Kayaking, etc."
+  opts.separator ""
+  opts.separator "Options:"
+
+  opts.on("-g", "--gpx FILE", String,
+          "GPX file to extract bounds from (e.g., Gaia area export)") do |f|
+    options[:gpx_file] = f
+  end
+
+  opts.on("-u", "--gaia-url URL", String,
+          "Gaia GPS area URL to extract bounds from") do |u|
+    options[:gaia_url] = u
+  end
+
+  opts.on("-a", "--activity ACTIVITY", String,
+          "Activity type (default: #{options[:activity]})") do |a|
+    options[:activity] = a
+  end
+
+  opts.on("-c", "--color COLOR", StravaHeatmap::VALID_COLORS,
+          "Heatmap color: #{StravaHeatmap::VALID_COLORS.join(', ')} (default: #{options[:color]})") do |c|
+    options[:color] = c
+  end
+
+  opts.on("-z", "--min-zoom ZOOM", Integer,
+          "Minimum zoom level (default: #{options[:min_zoom]})") do |z|
+    options[:min_zoom] = z
+  end
+
+  opts.on("-Z", "--max-zoom ZOOM", Integer,
+          "Maximum zoom level (default: #{options[:max_zoom]})") do |z|
+    options[:max_zoom] = z
+  end
+
+  opts.on("-p", "--prefix PREFIX", String,
+          "S3 key prefix (default: #{options[:prefix]})") do |p|
+    options[:prefix] = p
+  end
+
+  opts.on("-s", "--skip-existing",
+          "Skip tiles that already exist in S3") do
+    options[:skip_existing] = true
+  end
+
+  opts.on("-n", "--dry-run",
+          "Show what would be downloaded without actually doing it") do
+    options[:dry_run] = true
+  end
+
+  opts.on("-k", "--kml FILE", String,
+          "Generate KML file with tile overlays (uses existing S3 tiles)") do |f|
+    options[:kml_output] = f
+  end
+
+  opts.separator ""
+  opts.separator "Area management:"
+
+  opts.on("--list-areas",
+          "List all saved areas") do
+    options[:list_areas] = true
+  end
+
+  opts.on("--area NAME", String,
+          "Use a saved area's bounds") do |name|
+    options[:use_area] = name
+  end
+
+  opts.on("--save-area NAME", String,
+          "Save this area after downloading") do |name|
+    options[:save_area] = name
+  end
+
+  opts.on("--save-only NAME", String,
+          "Just save the area (no download, no S3 checks)") do |name|
+    options[:save_only] = name
+  end
+
+  opts.on("--delete-area NAME", String,
+          "Delete a saved area") do |name|
+    options[:delete_area] = name
+  end
+
+  opts.separator ""
+
+  opts.on("-h", "--help", "Show this help message") do
+    puts opts
+    exit
+  end
+
+  opts.on("-v", "--version", "Show version") do
+    puts "strava_heatmap #{StravaHeatmap::VERSION}"
+    exit
+  end
+end
+
+begin
+  # Use order! instead of parse! to stop at first non-option (coordinates with negative numbers)
+  parser.order!
+rescue OptionParser::InvalidOption => e
+  # If it looks like a negative coordinate, that's fine - just continue
+  # Re-add the "invalid option" back to ARGV for coordinate parsing
+  e.args.each { |arg| ARGV.unshift(arg) }
+rescue OptionParser::InvalidArgument => e
+  warn "Error: #{e.message}"
+  warn parser
+  exit 1
+end
+
+# Area management commands
+area_store = StravaHeatmap::AreaStore.new
+
+if options[:list_areas]
+  areas = area_store.list
+  if areas.empty?
+    puts "No saved areas."
+  else
+    puts "Saved areas:"
+    puts ""
+    areas.each do |area|
+      puts "  #{area['name']}"
+      puts "    Bounds: (#{area['nw_lat']}, #{area['nw_lng']}) to (#{area['se_lat']}, #{area['se_lng']})"
+      puts "    Activity: #{area['activity']}, Color: #{area['color']}"
+      puts "    Zoom: #{area['min_zoom']}-#{area['max_zoom']}"
+      puts "    Created: #{area['created_at']}"
+      puts ""
+    end
+  end
+  exit 0
+end
+
+if options[:delete_area]
+  if area_store.delete(options[:delete_area])
+    puts "Deleted area: #{options[:delete_area]}"
+  else
+    warn "Area not found: #{options[:delete_area]}"
+    exit 1
+  end
+  exit 0
+end
+
+# Get coordinates from saved area, Gaia URL, GPX file, or command line arguments
+if options[:use_area]
+  area = area_store.get(options[:use_area])
+  unless area
+    warn "Error: Area not found: #{options[:use_area]}"
+    warn ""
+    warn "Use --list-areas to see saved areas."
+    exit 1
+  end
+
+  nw_lat = area["nw_lat"]
+  nw_lng = area["nw_lng"]
+  se_lat = area["se_lat"]
+  se_lng = area["se_lng"]
+
+  # Use saved zoom levels if not overridden
+  options[:min_zoom] = area["min_zoom"] if area["min_zoom"] && options[:min_zoom] == StravaHeatmap::DEFAULT_MIN_ZOOM
+  options[:max_zoom] = area["max_zoom"] if area["max_zoom"] && options[:max_zoom] == StravaHeatmap::DEFAULT_MAX_ZOOM
+  options[:activity] = area["activity"] if area["activity"] && options[:activity] == StravaHeatmap::DEFAULT_ACTIVITY
+  options[:color] = area["color"] if area["color"] && options[:color] == StravaHeatmap::DEFAULT_COLOR
+
+  puts "Using saved area: #{area['name']}"
+  coordinate_source = "area"
+elsif options[:gaia_url]
+  begin
+    gaia = StravaHeatmap::GaiaFetcher.new(options[:gaia_url])
+    nw_lat, nw_lng, se_lat, se_lng = gaia.bounds
+    puts "Loaded area from Gaia: #{gaia.name || 'unnamed'}"
+    coordinate_source = "gaia"
+  rescue StravaHeatmap::Error => e
+    warn "Error fetching Gaia area: #{e.message}"
+    exit 1
+  end
+elsif options[:gpx_file]
+  begin
+    gpx = StravaHeatmap::GpxParser.new(options[:gpx_file])
+    nw_lat, nw_lng, se_lat, se_lng = gpx.bounds
+    puts "Loaded bounds from GPX: #{options[:gpx_file]}"
+    coordinate_source = "gpx"
+  rescue StravaHeatmap::Error => e
+    warn "Error reading GPX file: #{e.message}"
+    exit 1
+  end
+elsif ARGV.empty?
+  warn "Error: You must provide coordinates, a GPX file (--gpx), a Gaia URL (--gaia-url), or --area NAME"
+  warn parser
+  exit 1
+else
+  # Parse coordinates - handles multiple formats
+  def parse_all_coords(args)
+    combined = args.join(",")
+    parts = combined.split(",").map(&:strip).reject(&:empty?)
+
+    unless parts.length == 4
+      raise ArgumentError, "Expected 4 coordinate values (NW_LAT, NW_LNG, SE_LAT, SE_LNG), got #{parts.length}"
+    end
+
+    parts.map(&:to_f)
+  end
+
+  begin
+    nw_lat, nw_lng, se_lat, se_lng = parse_all_coords(ARGV)
+    coordinate_source = "manual"
+  rescue ArgumentError => e
+    warn "Error parsing coordinates: #{e.message}"
+    warn ""
+    warn "Expected formats:"
+    warn "  strava_heatmap 39.5,-120.5 38.5,-119.5"
+    warn "  strava_heatmap \"39.5, -120.5, 38.5, -119.5\""
+    warn "  strava_heatmap --gpx area.gpx"
+    exit 1
+  end
+end
+
+# Validate coordinates make sense
+if nw_lat <= se_lat
+  warn "Error: NW latitude (#{nw_lat}) must be greater than SE latitude (#{se_lat})"
+  exit 1
+end
+
+if nw_lng >= se_lng
+  warn "Error: NW longitude (#{nw_lng}) must be less than SE longitude (#{se_lng})"
+  exit 1
+end
+
+# Save-only mode: just save the area and exit
+if options[:save_only]
+  area_store.save(
+    options[:save_only],
+    { nw_lat: nw_lat, nw_lng: nw_lng, se_lat: se_lat, se_lng: se_lng },
+    {
+      activity: options[:activity],
+      color: options[:color],
+      min_zoom: options[:min_zoom],
+      max_zoom: options[:max_zoom],
+      source: coordinate_source
+    }
+  )
+  puts "Saved: #{options[:save_only]}"
+  exit 0
+end
+
+# Calculate tiles
+total_tiles = StravaHeatmap::TileCalculator.count_tiles(
+  nw_lat, nw_lng, se_lat, se_lng,
+  options[:min_zoom], options[:max_zoom]
+)
+
+puts "Region: (#{nw_lat}, #{nw_lng}) to (#{se_lat}, #{se_lng})"
+puts "Activity: #{options[:activity]}"
+puts "Color: #{options[:color]}"
+puts "Zoom levels: #{options[:min_zoom]}-#{options[:max_zoom]}"
+puts "Total tiles: #{total_tiles}"
+puts "Skip existing: #{options[:skip_existing] ? 'yes' : 'no'}"
+puts ""
+
+if options[:dry_run]
+  puts "[DRY RUN] Would download #{total_tiles} tiles"
+
+  # Show sample of tiles at each zoom level
+  (options[:min_zoom]..options[:max_zoom]).each do |zoom|
+    tiles = StravaHeatmap::TileCalculator.tiles_for_bounds(nw_lat, nw_lng, se_lat, se_lng, zoom)
+    puts "  Zoom #{zoom}: #{tiles.length} tiles"
+  end
+
+  # Save area if requested
+  if options[:save_area]
+    area_store.save(
+      options[:save_area],
+      { nw_lat: nw_lat, nw_lng: nw_lng, se_lat: se_lat, se_lng: se_lng },
+      {
+        activity: options[:activity],
+        color: options[:color],
+        min_zoom: options[:min_zoom],
+        max_zoom: options[:max_zoom],
+        source: coordinate_source
+      }
+    )
+    puts ""
+    puts "Saved area as: #{options[:save_area]}"
+  end
+  exit 0
+end
+
+# KML generation mode
+if options[:kml_output]
+  generator = StravaHeatmap::KmlGenerator.new(
+    activity: options[:activity],
+    color: options[:color],
+    prefix: options[:prefix]
+  )
+
+  kml = generator.generate(
+    nw_lat, nw_lng, se_lat, se_lng,
+    options[:min_zoom], options[:max_zoom]
+  )
+
+  File.write(options[:kml_output], kml)
+  puts "KML file written to: #{options[:kml_output]}"
+  puts "Contains #{total_tiles} tile overlays"
+  puts ""
+  puts "Import this file into Google Earth to view the heatmap."
+
+  # Save area if requested
+  if options[:save_area]
+    area_store.save(
+      options[:save_area],
+      { nw_lat: nw_lat, nw_lng: nw_lng, se_lat: se_lat, se_lng: se_lng },
+      {
+        activity: options[:activity],
+        color: options[:color],
+        min_zoom: options[:min_zoom],
+        max_zoom: options[:max_zoom],
+        source: coordinate_source
+      }
+    )
+    puts ""
+    puts "Saved area as: #{options[:save_area]}"
+  end
+  exit 0
+end
+
+# Initialize fetcher and uploader
+begin
+  fetcher = StravaHeatmap::Fetcher.new(
+    activity: options[:activity],
+    color: options[:color]
+  )
+  uploader = StravaHeatmap::S3Uploader.new(
+    prefix: options[:prefix],
+    activity: options[:activity],
+    color: options[:color]
+  )
+rescue StravaHeatmap::Error => e
+  warn "Configuration error: #{e.message}"
+  exit 1
+end
+
+puts "S3 Bucket: #{uploader.bucket}"
+puts "URL template for CalTopo/Gaia:"
+puts "  #{uploader.url_template}"
+puts ""
+puts "Downloading tiles..."
+
+# Download and upload tiles
+tiles = StravaHeatmap::TileCalculator.tiles_for_bounds_range(
+  nw_lat, nw_lng, se_lat, se_lng,
+  options[:min_zoom], options[:max_zoom]
+)
+
+success_count = 0
+skipped_count = 0
+empty_count = 0
+error_count = 0
+
+tiles.each_with_index do |tile, index|
+  progress = ((index + 1).to_f / total_tiles * 100).round(1)
+  print "\r[#{progress}%] Processing z=#{tile[:z]} x=#{tile[:x]} y=#{tile[:y]}...          "
+
+  begin
+    # Check if tile already exists
+    if options[:skip_existing] && uploader.exists?(tile)
+      skipped_count += 1
+      next
+    end
+
+    tempfile = fetcher.fetch_tile(tile)
+
+    if tempfile.nil?
+      # 404 - no data for this tile (empty area)
+      empty_count += 1
+    else
+      uploader.upload(tile, tempfile)
+      tempfile.close
+      tempfile.unlink if tempfile.respond_to?(:unlink)
+      success_count += 1
+    end
+  rescue StravaHeatmap::Error => e
+    error_count += 1
+    warn "\nError: #{e.message}"
+  rescue Aws::S3::Errors::ServiceError => e
+    error_count += 1
+    warn "\nS3 Error: #{e.message}"
+  end
+
+  # Small delay to be nice to Strava's servers
+  sleep(0.1)
+end
+
+puts "\n"
+puts "Complete!"
+puts "  Uploaded: #{success_count}"
+puts "  Skipped (existing): #{skipped_count}"
+puts "  Empty (no data): #{empty_count}"
+puts "  Errors: #{error_count}"
+puts ""
+puts "URL template for CalTopo/Gaia:"
+puts "  #{uploader.url_template}"
+
+# Save area if requested
+if options[:save_area]
+  area_store.save(
+    options[:save_area],
+    { nw_lat: nw_lat, nw_lng: nw_lng, se_lat: se_lat, se_lng: se_lng },
+    {
+      activity: options[:activity],
+      color: options[:color],
+      min_zoom: options[:min_zoom],
+      max_zoom: options[:max_zoom],
+      source: coordinate_source
+    }
+  )
+  puts ""
+  puts "Saved area as: #{options[:save_area]}"
+  puts "Use --area #{options[:save_area]} to reload these bounds."
+end

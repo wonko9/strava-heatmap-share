@@ -1,0 +1,89 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Test script to verify Strava cookie authentication is working
+
+require "dotenv"
+require "net/http"
+require "uri"
+
+Dotenv.load
+
+cookie = ENV["STRAVA_COOKIE"]
+
+if cookie.nil? || cookie.empty?
+  puts "ERROR: STRAVA_COOKIE is not set in your .env file"
+  puts ""
+  puts "To get your cookie:"
+  puts "  1. Go to https://www.strava.com/maps/personal-heatmap"
+  puts "  2. Open Developer Tools (F12) > Network tab"
+  puts "  3. Filter by 'personal-heatmaps-external'"
+  puts "  4. Click on any tile request (.png file)"
+  puts "  5. Copy the full Cookie header from Request Headers"
+  exit 1
+end
+
+puts "Testing Strava authentication..."
+puts ""
+puts "Cookie length: #{cookie.length} characters"
+puts ""
+
+# Build test URL using the new format
+# /tiles/{strava_id}/{color}/{z}/{x}/{y}@2x.png?filter_type=sport_{activity}&...
+query = URI.encode_www_form(
+  "filter_type" => "sport_BackcountrySki",
+  "include_everyone" => "true",
+  "include_followers_only" => "true",
+  "include_only_me" => "true",
+  "respect_privacy_zones" => "false",
+  "include_commutes" => "false"
+)
+
+# Global heatmap URL format
+test_url = "https://content-a.strava.com/identified/globalheat/sport_BackcountrySki/hot/11/346/792@2x.png?v=19"
+
+puts "Fetching test tile..."
+puts "URL: #{test_url[0..80]}..."
+puts ""
+
+uri = URI.parse(test_url)
+http = Net::HTTP.new(uri.host, uri.port)
+http.use_ssl = true
+
+request = Net::HTTP::Get.new(uri.request_uri)
+request["Cookie"] = cookie
+request["User-Agent"] = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+request["Referer"] = "https://www.strava.com/maps/personal-heatmap"
+
+response = http.request(request)
+
+case response.code
+when "200"
+  puts "SUCCESS! Authentication is working."
+  puts ""
+  puts "Response: #{response.code} #{response.message}"
+  puts "Content-Type: #{response['content-type']}"
+  puts "Content-Length: #{response['content-length']} bytes"
+  puts ""
+  puts "You're ready to download tiles!"
+when "403"
+  puts "FAILED: 403 Forbidden"
+  puts ""
+  puts "The cookie was rejected. This usually means:"
+  puts "  1. Cookie has expired"
+  puts "  2. Cookie was not copied completely"
+  puts ""
+  puts "Please get a fresh cookie from your browser."
+when "401"
+  puts "FAILED: 401 Unauthorized"
+  puts ""
+  puts "Authentication failed. Please check:"
+  puts "  1. Your STRAVA_ID is correct"
+  puts "  2. Your cookie is from the personal-heatmap page"
+  puts ""
+  puts "Cookie starts with: #{cookie[0..50]}..."
+else
+  puts "UNEXPECTED RESPONSE: #{response.code} #{response.message}"
+  puts ""
+  puts "Body: #{response.body[0..500]}" if response.body
+end

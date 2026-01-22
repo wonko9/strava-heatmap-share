@@ -1,0 +1,69 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "dotenv"
+require "base64"
+require "json"
+require "time"
+
+Dotenv.load
+
+cookie = ENV["STRAVA_COOKIE"]
+
+if cookie.nil? || cookie.empty?
+  puts "STRAVA_COOKIE is not set"
+  exit 1
+end
+
+# Extract policy
+policy_match = cookie.match(/CloudFront-Policy=([^;]+)/)
+unless policy_match
+  puts "Could not find CloudFront-Policy in cookie"
+  exit 1
+end
+
+policy_b64 = policy_match[1]
+puts "Policy (base64): #{policy_b64[0..50]}..."
+puts ""
+
+begin
+  # CloudFront uses URL-safe base64 - need to convert and add padding
+  policy_standard = policy_b64.tr('-_', '+/')
+  # Add padding if needed
+  policy_standard += '=' * (4 - policy_standard.length % 4) % 4
+
+  policy_json = Base64.decode64(policy_standard)
+  policy = JSON.parse(policy_json)
+
+  puts "Decoded policy:"
+  puts JSON.pretty_generate(policy)
+  puts ""
+
+  # Extract expiration
+  if policy["Statement"] && policy["Statement"][0] && policy["Statement"][0]["Condition"]
+    epoch = policy["Statement"][0]["Condition"]["DateLessThan"]["AWS:EpochTime"]
+    expiry = Time.at(epoch)
+    now = Time.now
+
+    puts "Expiration: #{expiry}"
+    puts "Current time: #{now}"
+    puts ""
+
+    if now > expiry
+      puts "STATUS: EXPIRED (#{((now - expiry) / 3600).round} hours ago)"
+    else
+      remaining = ((expiry - now) / 3600).round
+      puts "STATUS: Valid for #{remaining} more hours (#{(remaining / 24.0).round(1)} days)"
+    end
+  end
+rescue JSON::ParserError => e
+  puts "JSON parse error: #{e.message}"
+  puts ""
+  puts "Decoded string (first 200 chars):"
+  policy_standard = policy_b64.tr('-_', '+/')
+  policy_standard += '=' * (4 - policy_standard.length % 4) % 4
+  decoded = Base64.decode64(policy_standard)
+  puts decoded[0..200]
+rescue => e
+  puts "Error: #{e.class} - #{e.message}"
+end

@@ -1,0 +1,26 @@
+# Environment
+.env
+
+# Ruby
+*.gem
+.bundle/
+Gemfile.lock
+pkg/
+vendor/bundle/
+
+# IDE
+.idea/
+*.swp
+*.swo
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Personal data / output files
+*.kml
+*.gpx
+
+# Claude local settings
+.claude/

@@ -1,0 +1,53 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "dotenv"
+require "aws-sdk-s3"
+
+Dotenv.load
+
+bucket = ENV["AWS_S3_BUCKET"]
+
+regions = %w[
+  us-east-1 us-east-2 us-west-1 us-west-2
+  eu-west-1 eu-central-1
+  ap-northeast-1 ap-southeast-1
+]
+
+puts "Searching for bucket '#{bucket}' across regions..."
+puts ""
+
+regions.each do |region|
+  print "Checking #{region}... "
+  begin
+    client = Aws::S3::Client.new(region: region)
+    client.head_bucket(bucket: bucket)
+    puts "FOUND!"
+    puts ""
+    puts "Update your .env file:"
+    puts "  AWS_REGION=#{region}"
+    exit 0
+  rescue Aws::S3::Errors::NotFound, Aws::S3::Errors::NoSuchBucket
+    puts "not here"
+  rescue Aws::S3::Errors::Moved, Aws::S3::Errors::PermanentRedirect => e
+    # Extract the actual region from the error
+    puts "redirected"
+    if e.context && e.context.http_response
+      headers = e.context.http_response.headers
+      if headers['x-amz-bucket-region']
+        actual = headers['x-amz-bucket-region']
+        puts ""
+        puts "Bucket is in region: #{actual}"
+        puts "Update your .env file:"
+        puts "  AWS_REGION=#{actual}"
+        exit 0
+      end
+    end
+  rescue => e
+    puts "error: #{e.class}"
+  end
+end
+
+puts ""
+puts "Bucket not found in any common region."
+puts "Please verify the bucket name is correct in AWS Console."

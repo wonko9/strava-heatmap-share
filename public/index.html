@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Strava Heatmap Viewer</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    html, body, #map {
+      height: 100%;
+      margin: 0;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+
+    .controls {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      z-index: 1000;
+      background: white;
+      padding: 12px;
+      border-radius: 8px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+      font-size: 14px;
+    }
+
+    .controls label {
+      display: block;
+      margin-bottom: 8px;
+    }
+
+    .controls select, .controls input {
+      margin-left: 8px;
+    }
+
+    .controls h3 {
+      margin: 0 0 10px 0;
+      font-size: 16px;
+    }
+  </style>
+</head>
+<body>
+  <div class="controls">
+    <h3>Strava Heatmap</h3>
+    <label>
+      Activity:
+      <select id="activity">
+        <option value="BackcountrySki" selected>Backcountry Ski</option>
+        <option value="NordicSki">Nordic Ski</option>
+        <option value="AlpineSki">Alpine Ski</option>
+        <option value="Snowboard">Snowboard</option>
+        <option value="Snowshoe">Snowshoe</option>
+        <option value="Hike">Hike</option>
+        <option value="Run">Run</option>
+        <option value="Ride">Ride</option>
+      </select>
+    </label>
+    <label>
+      Opacity:
+      <input type="range" id="opacity" min="0" max="100" value="70">
+    </label>
+  </div>
+
+  <div id="map"></div>
+
+  <script>
+    // Configuration - update these values
+    const CONFIG = {
+      S3_BUCKET_URL: 'https://amp-strava-heatmap.s3.us-west-2.amazonaws.com',
+      TILE_PREFIX: 'tiles',
+      COLOR: 'hot',
+      DEFAULT_CENTER: { lat: 37.6, lng: -119.0 },
+      DEFAULT_ZOOM: 11
+    };
+
+    let map;
+    let heatmapLayer;
+
+    function initMap() {
+      map = new google.maps.Map(document.getElementById("map"), {
+        center: CONFIG.DEFAULT_CENTER,
+        zoom: CONFIG.DEFAULT_ZOOM,
+        mapTypeId: "terrain",
+        mapTypeControl: true,
+        mapTypeControlOptions: {
+          style: google.maps.MapTypeControlStyle.DROPDOWN_MENU,
+          mapTypeIds: ["roadmap", "terrain", "satellite", "hybrid"]
+        }
+      });
+
+      // Add initial heatmap layer
+      addHeatmapLayer(document.getElementById('activity').value);
+
+      // Activity selector
+      document.getElementById('activity').addEventListener('change', function() {
+        addHeatmapLayer(this.value);
+      });
+
+      // Opacity slider
+      document.getElementById('opacity').addEventListener('input', function() {
+        if (heatmapLayer) {
+          heatmapLayer.setOpacity(this.value / 100);
+        }
+      });
+    }
+
+    function addHeatmapLayer(activity) {
+      // Remove existing layer
+      if (heatmapLayer) {
+        const index = map.overlayMapTypes.indexOf(heatmapLayer);
+        if (index > -1) {
+          map.overlayMapTypes.removeAt(index);
+        }
+      }
+
+      // Create new layer
+      heatmapLayer = new google.maps.ImageMapType({
+        getTileUrl: function(coord, zoom) {
+          return `${CONFIG.S3_BUCKET_URL}/${CONFIG.TILE_PREFIX}/${activity}/${CONFIG.COLOR}/${zoom}/${coord.x}/${coord.y}.png`;
+        },
+        tileSize: new google.maps.Size(256, 256),
+        opacity: document.getElementById('opacity').value / 100,
+        name: 'Strava Heatmap'
+      });
+
+      map.overlayMapTypes.push(heatmapLayer);
+    }
+  </script>
+
+  <!-- Replace YOUR_API_KEY with your actual Google Maps API key -->
+  <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyACrJcANd7f5t44OBmkKKCygTp2wHOk76g&callback=initMap" async defer></script>
+</body>
+</html>
